@@ -263,6 +263,9 @@ if AUTH_ENABLED:
             # Cloudflare tunnel / reverse proxy. Keep LOCALHOST_BYPASS=false for
             # network-exposed deployments regardless.
             if LOCALHOST_BYPASS and _is_trusted_loopback(request):
+                _admin = next((u for u, d in getattr(auth_manager, "users", {}).items() if isinstance(d, dict) and d.get("is_admin")), None)
+                if _admin:
+                    request.state.current_user = _admin
                 return await call_next(request)
             if not auth_manager.is_configured:
                 # No users yet — redirect to login for first-time setup
@@ -1024,4 +1027,19 @@ async def shutdown_event():
         await mcp_manager.disconnect_all()
     except Exception as e:
         logger.warning(f"MCP shutdown error: {e}")
+    # Unload all Ollama models so their GPU/RAM is freed immediately.
+    try:
+        import httpx
+        ollama_root = os.getenv("OLLAMA_BASE_URL", os.getenv("OLLAMA_URL", "http://127.0.0.1:11434"))
+        ollama_root = ollama_root.rstrip("/").removesuffix("/v1")
+        async with httpx.AsyncClient(timeout=3.0) as hc:
+            ps = await hc.get(f"{ollama_root}/api/ps")
+            for m in ps.json().get("models", []):
+                await hc.post(
+                    f"{ollama_root}/api/generate",
+                    json={"model": m["name"], "keep_alive": 0},
+                )
+                logger.info(f"Ollama model unloaded: {m['name']}")
+    except Exception as e:
+        logger.warning(f"Ollama unload on shutdown failed (non-critical): {e}")
     logger.info("Application shutdown complete")
